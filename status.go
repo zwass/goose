@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-func Status(db *sql.DB, dir string) error {
+func (c *client) Status(db *sql.DB, dir string) error {
 	// collect all migrations
-	migrations, err := collectMigrations(dir, minVersion, maxVersion)
+	migrations, err := c.collectMigrations(dir, minVersion, maxVersion)
 	if err != nil {
 		return err
 	}
 
 	// must ensure that the version table exists if we're running on a pristine DB
-	if _, err := EnsureDBVersion(db); err != nil {
+	if _, err := c.GetDBVersion(db); err != nil {
 		return err
 	}
 

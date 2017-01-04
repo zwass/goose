@@ -14,9 +14,10 @@ var (
 	ErrNoCurrentVersion = errors.New("no current version found")
 	ErrNoNextVersion    = errors.New("no next version found")
 
-	MaxVersion int64 = 9223372036854775807 // max(int64)
-
-	goMigrations []*Migration
+	globalGoose = &client{
+		TableName: "goose_db_version",
+		Dialect:   &PostgresDialect{},
+	}
 )
 
 type Migrations []*Migration
@@ -67,17 +68,30 @@ func (ms Migrations) String() string {
 	return str
 }
 
-func AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
+// AddMigration adds a new go migration to the goose struct.
+func (c *client) AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
 	_, filename, _, _ := runtime.Caller(1)
 	v, _ := NumericComponent(filename)
 	migration := &Migration{Version: v, Next: -1, Previous: -1, UpFn: up, DownFn: down, Source: filename}
 
-	goMigrations = append(goMigrations, migration)
+	c.migrations = append(c.migrations, migration)
+}
+
+// AddMigration exists for legacy support of the package global use of Goose.
+// Calling the AddMigration method on a Goose struct is the preferred method.
+func AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
+	// We can't just use globalGoose.AddMigration here because we need to
+	// correctly record the caller.
+	_, filename, _, _ := runtime.Caller(1)
+	v, _ := NumericComponent(filename)
+	migration := &Migration{Version: v, Next: -1, Previous: -1, UpFn: up, DownFn: down, Source: filename}
+
+	globalGoose.migrations = append(globalGoose.migrations, migration)
 }
 
 // collect all the valid looking migration scripts in the
 // migrations folder and go func registry, and key them by version
-func collectMigrations(dirpath string, current, target int64) (Migrations, error) {
+func (c *client) collectMigrations(dirpath string, current, target int64) (Migrations, error) {
 	var migrations Migrations
 
 	// extract the numeric component of each migration,
@@ -99,7 +113,7 @@ func collectMigrations(dirpath string, current, target int64) (Migrations, error
 		}
 	}
 
-	for _, migration := range goMigrations {
+	for _, migration := range c.migrations {
 		v, err := NumericComponent(migration.Source)
 		if err != nil {
 			return nil, err
@@ -146,11 +160,11 @@ func versionFilter(v, current, target int64) bool {
 
 // retrieve the current version for this DB.
 // Create and initialize the DB version table if it doesn't exist.
-func EnsureDBVersion(db *sql.DB) (int64, error) {
+func (c *client) GetDBVersion(db *sql.DB) (int64, error) {
 
-	rows, err := GetDialect().dbVersionQuery(db)
+	rows, err := c.Dialect.dbVersionQuery(db, c.TableName)
 	if err != nil {
-		return 0, createVersionTable(db)
+		return 0, c.createVersionTable(db)
 	}
 	defer rows.Close()
 
@@ -193,36 +207,25 @@ func EnsureDBVersion(db *sql.DB) (int64, error) {
 
 // Create the goose_db_version table
 // and insert the initial 0 value into it
-func createVersionTable(db *sql.DB) error {
+func (c *client) createVersionTable(db *sql.DB) error {
 	txn, err := db.Begin()
 	if err != nil {
 		return err
 	}
 
-	d := GetDialect()
+	d := c.Dialect
 
-	if _, err := txn.Exec(d.createVersionTableSql()); err != nil {
+	if _, err := txn.Exec(d.createVersionTableSql(c.TableName)); err != nil {
 		txn.Rollback()
 		return err
 	}
 
 	version := 0
 	applied := true
-	if _, err := txn.Exec(d.insertVersionSql(), version, applied); err != nil {
+	if _, err := txn.Exec(d.insertVersionSql(c.TableName), version, applied); err != nil {
 		txn.Rollback()
 		return err
 	}
 
 	return txn.Commit()
-}
-
-// wrapper for EnsureDBVersion for callers that don't already have
-// their own DB instance
-func GetDBVersion(db *sql.DB) (int64, error) {
-	version, err := EnsureDBVersion(db)
-	if err != nil {
-		return -1, err
-	}
-
-	return version, nil
 }
